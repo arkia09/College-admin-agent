@@ -1,5 +1,3 @@
-# College-admin-agent
-
 # College Admin Agent
 
 An MCP (Model Context Protocol) server that manages a student's assignments and
