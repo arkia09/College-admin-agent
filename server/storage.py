@@ -1,9 +1,9 @@
 """
 storage.py
-Plain CRUD layer over data/tasks.json. No MCP, no LLM — just functions
-you can call directly and unit-test before wiring anything else up.
+Simple CRUD on top of a JSON file. No MCP, no LLM here, only plain functions,
+so I can test this part alone before connecting anything else.
 
-Task shape:
+Task looks like this:
 {
     "id": "a1b2c3d4",
     "title": "OS Assignment 2",
@@ -12,6 +12,9 @@ Task shape:
     "priority": "high",         # low | medium | high
     "status": "pending"         # pending | done
 }
+
+By default tasks are kept in data/tasks.json. If you want to use some other
+file (for testing mainly), set the TASKS_FILE environment variable.
 """
 
 import json
@@ -19,14 +22,14 @@ import os
 import tempfile
 import threading
 import uuid
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 
-# data/tasks.json, relative to this file's location (server/ -> ../data)
+# default: data/tasks.json, one level up from this server/ folder
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(_THIS_DIR, "..", "data", "tasks.json")
+DATA_PATH = os.environ.get("TASKS_FILE") or os.path.join(_THIS_DIR, "..", "data", "tasks.json")
 
-_LOCK = threading.RLock()  # server may handle concurrent requests
+_LOCK = threading.RLock()  # server can get more than one request at a time
 
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_STATUSES = {"pending", "done"}
@@ -40,7 +43,7 @@ class InvalidTaskDataError(Exception):
     pass
 
 
-# ---------- low-level load/save ----------
+# ---------- load / save ----------
 
 def _load() -> list[dict]:
     if not os.path.exists(DATA_PATH):
@@ -53,8 +56,8 @@ def _load() -> list[dict]:
 
 
 def _save(tasks: list[dict]) -> None:
-    # Atomic write: write to a temp file, then replace. A crash mid-write can
-    # no longer leave tasks.json truncated/corrupt.
+    # write to a temp file first and then replace, so that if the program dies
+    # in the middle, tasks.json does not get half-written/corrupt
     directory = os.path.dirname(DATA_PATH)
     os.makedirs(directory, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
@@ -69,9 +72,10 @@ def _save(tasks: list[dict]) -> None:
 
 
 def _validate_due_date(due_date: str) -> str:
-    """Validate and return the canonical YYYY-MM-DD form.
-    (Python 3.11+ fromisoformat also accepts '20261011' / '2026-W41-1';
-    storing those raw would break string sorting, so we normalise.)"""
+    """Check the date and give back the proper YYYY-MM-DD string.
+    Python 3.11+ fromisoformat() also accepts things like '20261011' or
+    '2026-W41-1'. If we store them as it is, sorting by string will break,
+    that is why we convert everything to one format."""
     try:
         return date.fromisoformat(due_date.strip()).isoformat()
     except (ValueError, AttributeError):
@@ -80,10 +84,10 @@ def _validate_due_date(due_date: str) -> str:
         )
 
 
-# ---------- public CRUD functions ----------
+# ---------- public functions ----------
 
 def add_task(title: str, subject: str, due_date: str, priority: str = "medium") -> dict:
-    """Create a new task and persist it. Returns the created task record."""
+    """Create a new task, save it, and return it."""
     if not title or not title.strip():
         raise InvalidTaskDataError("title must not be empty")
     if not subject or not subject.strip():
@@ -119,11 +123,11 @@ def list_tasks(
     due_before: Optional[str] = None,
 ) -> list[dict]:
     """
-    Return tasks, optionally filtered.
+    Get tasks, with optional filters.
     - subject: case-insensitive partial match
     - status: 'pending' or 'done'
-    - due_before: ISO date string; only tasks due on or before this date
-    Results are sorted by due_date ascending.
+    - due_before: ISO date; only tasks due on or before this date
+    Result is sorted by due_date (earliest first).
     """
     tasks = _load()
 
@@ -147,16 +151,15 @@ def list_tasks(
 
 
 def get_task(task_id: str) -> dict:
-    """Fetch a single task by id. Raises TaskNotFoundError if missing."""
-    tasks = _load()
-    for t in tasks:
+    """Get one task by id. Raises TaskNotFoundError if it is not there."""
+    for t in _load():
         if t["id"] == task_id:
             return t
     raise TaskNotFoundError(f"No task with id {task_id!r}")
 
 
 def mark_done(task_id: str) -> dict:
-    """Mark a task as done. Returns the updated task record."""
+    """Mark the task as done and return the updated task."""
     with _LOCK:
         tasks = _load()
         for t in tasks:
@@ -168,17 +171,10 @@ def mark_done(task_id: str) -> dict:
 
 
 def delete_task(task_id: str) -> None:
-    """Remove a task entirely. Raises TaskNotFoundError if missing."""
+    """Remove the task completely. Raises TaskNotFoundError if it is not there."""
     with _LOCK:
         tasks = _load()
         remaining = [t for t in tasks if t["id"] != task_id]
         if len(remaining) == len(tasks):
             raise TaskNotFoundError(f"No task with id {task_id!r}")
         _save(remaining)
-
-
-def days_until_due(task: dict, reference: Optional[date] = None) -> int:
-    """Helper the study-plan generator will use later: days between today and due_date."""
-    reference = reference or datetime.now().date()
-    due = date.fromisoformat(task["due_date"])
-    return (due - reference).days

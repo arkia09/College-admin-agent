@@ -1,21 +1,74 @@
 """
 server.py
-The MCP server. Wraps storage.py + study_plan.py as MCP tools and serves them
-over Streamable HTTP.
+The MCP server. It takes storage.py + study_plan.py and exposes them as MCP
+tools over Streamable HTTP.
 
 Run:   python server/server.py
-MCP endpoint (NOT a website -- browsers get 404/400 here, that's normal):
+MCP endpoint (this is NOT a website, so browser will show 404/400 here, that is normal):
        http://127.0.0.1:8000/mcp
 Test:  python server/test_client.py     (no API key needed)
 """
 
+import os
 from typing import Annotated, Literal, Optional
 
+from mcp.server.apps import Apps
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 import storage
 from study_plan import generate_study_plan as _generate_study_plan
+
+# --- MCP Apps: interactive study-plan view -------------------------------
+# generate_study_plan is linked to a ui:// resource. Hosts which support MCP Apps
+# will show ui/plan_view.html inside a sandboxed iframe. Other clients (like our
+# CLI agent) just ignore the UI and get the normal JSON text, so nothing breaks.
+apps = Apps()
+PLAN_UI_URI = "ui://college-admin/study-plan.html"
+_UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "plan_view.html")
+
+# Where the web chat (web_app.py) is running. The "Ask agent to build your study
+# plan" button in the view opens this. Change it with AGENT_URL if you use another port.
+AGENT_URL = os.environ.get("AGENT_URL", "http://127.0.0.1:8081").rstrip("/")
+
+with open(_UI_PATH, "r", encoding="utf-8") as _f:
+    # the html is a static file, so we just replace one placeholder with the real url
+    PLAN_UI_HTML = _f.read().replace("__AGENT_URL__", AGENT_URL)
+
+
+IsoDate = Annotated[str, Field(description="ISO date, YYYY-MM-DD, e.g. 2026-10-02")]
+
+
+@apps.tool(
+    resource_uri=PLAN_UI_URI,
+    description=(
+        "Generate a day-wise study plan for pending tasks over a date range. "
+        "Only pending tasks due on or before end_date are included. "
+        "In MCP Apps hosts this renders an interactive plan the student can adjust."
+    )
+)
+def generate_study_plan(
+    start_date: IsoDate,
+    end_date: IsoDate,
+    hours_per_day: Annotated[
+        float, Field(gt=0, le=24, description="Hours the student can study per day")
+    ],
+) -> dict:
+    try:
+        pending = storage.list_tasks(status="pending")
+        plan = _generate_study_plan(pending, start_date, end_date, hours_per_day)
+        return {"ok": True, "plan": plan}
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+
+apps.add_html_resource(
+    PLAN_UI_URI,
+    PLAN_UI_HTML,
+    name="study_plan_view",
+    title="Study Plan",
+    description="Interactive day-by-day study plan",
+)
 
 mcp = MCPServer(
     name="CollegeAdminAgent",
@@ -25,9 +78,8 @@ mcp = MCPServer(
         "day-wise study plans. Dates are always ISO format YYYY-MM-DD. "
         "Priority is one of low/medium/high."
     ),
+    extensions=[apps],
 )
-
-IsoDate = Annotated[str, Field(description="ISO date, YYYY-MM-DD, e.g. 2026-10-02")]
 
 
 @mcp.tool(description="Add a new assignment/task to track.")
@@ -72,27 +124,6 @@ def mark_done(
     try:
         return {"ok": True, "task": storage.mark_done(task_id)}
     except storage.TaskNotFoundError as e:
-        return {"ok": False, "error": str(e)}
-
-
-@mcp.tool(
-    description=(
-        "Generate a day-wise study plan for pending tasks over a date range. "
-        "Only pending tasks due on or before end_date are included."
-    )
-)
-def generate_study_plan(
-    start_date: IsoDate,
-    end_date: IsoDate,
-    hours_per_day: Annotated[
-        float, Field(gt=0, le=24, description="Hours the student can study per day")
-    ],
-) -> dict:
-    try:
-        pending = storage.list_tasks(status="pending")
-        plan = _generate_study_plan(pending, start_date, end_date, hours_per_day)
-        return {"ok": True, "plan": plan}
-    except ValueError as e:
         return {"ok": False, "error": str(e)}
 
 

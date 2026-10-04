@@ -1,13 +1,14 @@
 """
 test_client.py
-End-to-end smoke test for the MCP server. NO Gemini key needed.
-Start the server in one terminal (python server/server.py), then in another:
+End-to-end smoke test for the MCP server. No Gemini key needed.
 
-    python server/test_client.py
+IMPORTANT: this test adds a few tasks, so start the server with a throwaway data
+file, otherwise they land in your real tasks.json:
 
-It talks to the server over real Streamable HTTP, exactly like an MCP client
-(or Alexa+) would. Uses a temporary task and removes nothing from your data
-except the task it creates (it marks it done at the end).
+    terminal 1:  TASKS_FILE=/tmp/test_tasks.json python server/server.py
+    terminal 2:  python server/test_client.py
+
+It talks over real Streamable HTTP, exactly how any MCP client (or Alexa+) would.
 """
 
 import asyncio
@@ -43,9 +44,24 @@ async def main():
     async with streamable_http_client(URL) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
-            tools = {t.name for t in (await s.list_tools()).tools}
+            tool_list = (await s.list_tools()).tools
+            tools = {t.name for t in tool_list}
             check("tools/list exposes the 4 tools",
                   tools == {"add_task", "list_tasks", "mark_done", "generate_study_plan"}, str(tools))
+
+            # MCP Apps wiring: tool -> ui:// resource -> HTML with the right MIME type
+            UI_URI = "ui://college-admin/study-plan.html"
+            plan_tool = next(t for t in tool_list if t.name == "generate_study_plan")
+            check("generate_study_plan declares _meta.ui.resourceUri",
+                  ((plan_tool.meta or {}).get("ui") or {}).get("resourceUri") == UI_URI, str(plan_tool.meta))
+            ui = (await s.read_resource(UI_URI)).contents[0]
+            check("ui:// resource served as text/html;profile=mcp-app",
+                  ui.mime_type == "text/html;profile=mcp-app", str(ui.mime_type))
+            check("UI implements the MCP Apps handshake",
+                  "ui/initialize" in ui.text and "ui/notifications/initialized" in ui.text)
+
+            check("agent url was filled in the UI (no leftover placeholder)",
+                  "__AGENT_URL__" not in ui.text and "Ask agent to build your study plan" in ui.text)
 
             today = date.today()
             due = (today + timedelta(days=3)).isoformat()
@@ -88,6 +104,6 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:  # connection refused etc.
+    except Exception as e:  # connection refused and so on
         print(f"Could not reach the MCP server at {URL}: {e!r}\nIs `python server/server.py` running?")
         sys.exit(1)

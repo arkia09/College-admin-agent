@@ -1,0 +1,26 @@
+[
+  {
+    "id": "s0000001",
+    "title": "Operating Systems assignment",
+    "subject": "OS",
+    "due_date": "2026-10-20",
+    "priority": "high",
+    "status": "pending"
+  },
+  {
+    "id": "s0000002",
+    "title": "DBMS quiz preparation",
+    "subject": "DBMS",
+    "due_date": "2026-10-14",
+    "priority": "medium",
+    "status": "pending"
+  },
+  {
+    "id": "s0000003",
+    "title": "C++ lab record",
+    "subject": "C++",
+    "due_date": "2026-10-25",
+    "priority": "low",
+    "status": "pending"
+  }
+]

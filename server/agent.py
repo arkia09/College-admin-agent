@@ -1,23 +1,22 @@
 """
 agent.py
-The "brain" of the College Admin Agent. Connects to our own MCP server
-(server.py) as a real MCP client, discovers its tools, hands them to
-Gemini as function declarations, and runs a tool-calling loop:
+The "brain" of College Admin Agent. It connects to our own MCP server
+(server.py) as a proper MCP client, finds out which tools are there, gives them
+to Gemini as function declarations, and then runs a tool-calling loop:
 
-    user message -> Gemini decides a tool call -> we execute it against
-    the MCP server -> feed the result back -> repeat until Gemini gives
-    a final text answer.
+    user message -> Gemini picks a tool call -> we run it on the MCP server
+    -> send the result back to Gemini -> repeat till Gemini gives final text
 
-Prerequisites:
-    1. server.py must be running separately, in another terminal:
-           python server.py
-       (it serves the MCP endpoint at http://127.0.0.1:8000/mcp)
-    2. Set an environment variable with a free Gemini API key:
+Before running:
+    1. server.py should already be running in another terminal:
+           python server/server.py
+       (MCP endpoint will be http://127.0.0.1:8000/mcp)
+    2. Set a free Gemini API key as environment variable:
            export GEMINI_API_KEY="your-key-here"
-       Get one free at https://aistudio.google.com/apikey
+       You can get one from https://aistudio.google.com/apikey
 
-Run with:
-    python agent.py
+Then run:
+    python server/agent.py
 """
 
 import asyncio
@@ -33,14 +32,11 @@ from mcp.client.streamable_http import streamable_http_client
 
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
-# NOTE on model choice: as of writing, Google's free tier reliably covers
-# the Gemini 2.5 line (gemini-2.5-flash / gemini-2.5-flash-lite). Some
-# reports say Gemini 2.5 models may be retired around October 16, 2026 --
-# if that happens before your demo, check https://aistudio.google.com for
-# current free-tier model availability and either set the GEMINI_MODEL
-# env var or edit the default below. gemini-2.5-flash-lite is the
-# higher-rate-limit free option if you hit rate limits during testing.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# About the model: gemini-2.5-flash was giving 404 for new API users, so I switched.
+# The default below worked for me on the free tier. Model names keep changing, so if
+# you get a 404 just set GEMINI_MODEL to something else, list is here:
+# https://ai.google.dev/gemini-api/docs/models
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 SYSTEM_INSTRUCTION = """Today's date is {today} ({weekday}). Use it to resolve phrases \
 like "tomorrow" or "next week" into ISO dates. You are a college admin assistant that helps a student track \
@@ -52,14 +48,14 @@ summarize the result for the student in plain, friendly language -- don't \
 just dump raw JSON at them. If a tool returns ok=false, explain the problem \
 and fix it (or ask the student) instead of pretending it worked."""
 
-MAX_TOOL_ROUNDS = 6  # safety cap so a confused model can't loop forever
+MAX_TOOL_ROUNDS = 6  # safety limit, so a confused model cannot keep looping forever
 
 
 def mcp_tool_to_gemini(tool) -> gtypes.FunctionDeclaration:
-    """Convert an MCP Tool (from tools/list) into a Gemini FunctionDeclaration.
-    Gemini accepts a raw JSON schema directly via parameters_json_schema, so
-    no manual schema translation is needed -- whatever server.py declares
-    (derived automatically from our Python type hints) is what Gemini sees."""
+    """Convert an MCP tool (from tools/list) into a Gemini FunctionDeclaration.
+    Gemini takes the raw JSON schema directly through parameters_json_schema,
+    so no manual conversion is needed. Whatever server.py declares (it comes
+    from our Python type hints) is exactly what Gemini sees."""
     return gtypes.FunctionDeclaration(
         name=tool.name,
         description=tool.description or "",
@@ -81,10 +77,12 @@ async def run_agent():
     client = genai.Client(api_key=api_key)
 
     print(f"Connecting to MCP server at {MCP_SERVER_URL} ...")
+    connected = False  # to know later whether the error came before or after connecting
     try:
         async with streamable_http_client(MCP_SERVER_URL) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
+                connected = True
 
                 tools_result = await session.list_tools()
                 mcp_tools = tools_result.tools
@@ -124,7 +122,7 @@ async def run_agent():
                         )
                     )
 
-                    turn_start = len(history) - 1  # so we can roll back on failure
+                    turn_start = len(history) - 1  # remember this, to roll back if something fails
                     for _ in range(MAX_TOOL_ROUNDS):
                         try:
                             response = await client.aio.models.generate_content(
@@ -132,7 +130,7 @@ async def run_agent():
                                 contents=history,
                                 config=config,
                             )
-                        except Exception as e:  # bad key, quota, retired model...
+                        except Exception as e:  # wrong key, quota over, model retired, etc.
                             print(f"Agent: Gemini API error ({GEMINI_MODEL}): {e}\n"
                                   "       (check GEMINI_API_KEY / GEMINI_MODEL)\n")
                             del history[turn_start:]
@@ -157,7 +155,7 @@ async def run_agent():
                             print(f"Agent: {text}\n")
                             break
 
-                        # Execute every requested tool call against the real MCP server.
+                        # run every tool call that Gemini asked for, on the real MCP server
                         response_parts = []
                         for fc in function_calls:
                             args = dict(fc.args or {})
@@ -186,10 +184,16 @@ async def run_agent():
                             "Agent: (stopped after too many tool calls in a row -- "
                             "something may be looping)\n"
                         )
-    except Exception as eg:
-        print(f"\nFailed to connect to MCP server at {MCP_SERVER_URL}.")
-        print("Is server.py running in another terminal? Start it with: python server.py")
-        print(f"Details: {eg.exceptions}")
+    except Exception as e:
+        # anyio wraps errors in an ExceptionGroup, but a normal exception has no
+        # .exceptions attribute, so use getattr (earlier this line itself used to crash)
+        details = "; ".join(repr(x) for x in getattr(e, "exceptions", [e]))
+        if connected:
+            print(f"\nLost the MCP connection while chatting: {details}")
+        else:
+            print(f"\nFailed to connect to MCP server at {MCP_SERVER_URL}.")
+            print("Is server.py running in another terminal? Start it with: python server/server.py")
+            print(f"Details: {details}")
         sys.exit(1)
 
 

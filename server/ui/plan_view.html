@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study Plan</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --card: #f6f8fa;
+    --border: #d0d7de; --accent: #2563eb; --warn-bg: #fff4e5; --warn-fg: #8a4b00;
+    --track: #e5e7eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --card: #161b22;
+      --border: #30363d; --accent: #58a6ff; --warn-bg: #3a2a10; --warn-fg: #f0b36a;
+      --track: #30363d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --card: #161b22;
+    --border: #30363d; --accent: #58a6ff; --warn-bg: #3a2a10; --warn-fg: #f0b36a;
+    --track: #30363d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 14px; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+              background: var(--card); border: 1px solid var(--border);
+              border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
+  .controls label { font-weight: 600; }
+  .controls input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  .pill { background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+          padding: 1px 10px; font-size: 12px; color: var(--muted); }
+  .warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 8px;
+          padding: 8px 12px; margin-bottom: 10px; font-size: 13px; }
+  .day { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
+         background: var(--card); overflow: hidden; }
+  .day-head { display: flex; justify-content: space-between; align-items: baseline;
+              padding: 6px 12px; font-weight: 600; }
+  .day-head small { color: var(--muted); font-weight: 400; }
+  .bar { height: 5px; background: var(--track); }
+  .bar > div { height: 100%; background: var(--accent); }
+  .block { display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+           border-top: 1px solid var(--border); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .block .t { flex: 1; min-width: 0; }
+  .block .t b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .block .t span { color: var(--muted); font-size: 12px; }
+  .hrs { font-variant-numeric: tabular-nums; font-weight: 600; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--border);
+           background: var(--bg); color: var(--fg); border-radius: 6px; padding: 2px 9px; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .rest { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); font-size: 13px; }
+  .msg { padding: 24px 8px; text-align: center; color: var(--muted); }
+  .err { color: #cf222e; }
+  .ask { background: var(--accent); color: #fff; border-color: var(--accent); margin-bottom: 10px; font-weight: 600; }
+  .ask:hover:not(:disabled) { color: #fff; opacity: .9; }
+</style>
+</head>
+<body>
+<div id="root"><div class="msg">Waiting for study plan&hellip;</div></div>
+
+<script>
+(function () {
+  "use strict";
+  var PROTOCOL_VERSION = "2026-01-26";
+  var nextId = 1, pending = {};
+  var plan = null, args = null, busy = false, replanTimer = null;
+  var hostName = "";   // filled after handshake, we need it to decide about the "Ask agent" button
+  // server.py replaces this placeholder with the real url of the web chat when it loads this file
+  var AGENT_URL = "__AGENT_URL__";
+  var root = document.getElementById("root");
+
+  // ---------- JSON-RPC over postMessage (View <-> Host) ----------
+  function send(msg) { window.parent.postMessage(msg, "*"); }
+  function request(method, params) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      pending[id] = { resolve: resolve, reject: reject };
+      send({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+    });
+  }
+  function notify(method, params) {
+    send({ jsonrpc: "2.0", method: method, params: params || {} });
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var m = event.data;
+    if (!m || m.jsonrpc !== "2.0") return;
+
+    if (m.method === undefined && m.id !== undefined) {           // response to our request
+      var p = pending[m.id]; if (!p) return; delete pending[m.id];
+      if (m.error) p.reject(new Error(m.error.message || "request failed")); else p.resolve(m.result);
+      return;
+    }
+    switch (m.method) {
+      case "ui/notifications/tool-input":
+        args = (m.params && m.params.arguments) || args; break;
+      case "ui/notifications/tool-result":
+        handleResult(m.params); break;
+      case "ui/notifications/host-context-changed":
+        applyHostContext(m.params); break;
+      case "ui/resource-teardown":
+        if (m.id !== undefined) send({ jsonrpc: "2.0", id: m.id, result: {} }); break;
+      default:
+        if (m.id !== undefined)                                    // unknown request, just reply with an error
+          send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "Method not found" } });
+    }
+  });
+
+  function applyHostContext(ctx) {
+    if (ctx && (ctx.theme === "dark" || ctx.theme === "light"))
+      document.documentElement.setAttribute("data-theme", ctx.theme);
+  }
+
+  // ---------- parse tool results ----------
+  function parseResult(res) {
+    if (!res) return { ok: false, error: "Empty result" };
+    if (res.structuredContent && typeof res.structuredContent === "object" && "ok" in res.structuredContent)
+      return res.structuredContent;
+    var text = (res.content || []).filter(function (c) { return c.type === "text"; })
+                                  .map(function (c) { return c.text; }).join("");
+    try { return JSON.parse(text); } catch (e) { return { ok: false, error: text || "Unreadable result" }; }
+  }
+  function handleResult(res) {
+    var data = parseResult(res);
+    if (!data.ok) { renderError(data.error); return; }
+    plan = data.plan;
+    if (!args) args = { start_date: plan.start_date, end_date: plan.end_date, hours_per_day: plan.hours_per_day };
+    render();
+  }
+
+  // Sandboxed iframe cannot navigate by itself, so we request the host to open the link.
+  // (ui/open-link is part of the MCP Apps spec; the host decides if it allows it or not)
+  function askAgent() {
+    var prompt = "Build my study plan from " + plan.start_date + " to " + plan.end_date +
+                 " at " + plan.hours_per_day + " hours a day.";
+    request("ui/open-link", { url: AGENT_URL + "/?prompt=" + encodeURIComponent(prompt) })
+      .catch(function (e) { renderError("Could not open the agent: " + e.message); });
+  }
+
+  // ---------- actions (call server tools through the host) ----------
+  function callTool(name, a) {
+    return request("tools/call", { name: name, arguments: a }).then(parseResult);
+  }
+  function replan(hours) {
+    var a = { start_date: plan.start_date, end_date: plan.end_date, hours_per_day: hours };
+    busy = true; render();
+    return callTool("generate_study_plan", a).then(function (d) {
+      if (d.ok) { plan = d.plan; args = a; } else { renderError(d.error); }
+    }).catch(function (e) { renderError(e.message); })
+      .then(function () { busy = false; render(); });
+  }
+  function markDone(taskId) {
+    busy = true; render();
+    callTool("mark_done", { task_id: taskId }).then(function (d) {
+      if (!d.ok) throw new Error(d.error);
+      busy = false; return replan(plan.hours_per_day);
+    }).catch(function (e) { busy = false; renderError(e.message); });
+  }
+
+  // ---------- rendering (only textContent, because task titles are user-typed data) ----------
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function hue(str) {
+    var h = 0; for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 360;
+    return h;
+  }
+  function fmtDate(iso) {
+    var p = iso.split("-").map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
+    return { wd: d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }),
+             md: d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) };
+  }
+  function fmtH(h) { return (Math.round(h * 100) / 100) + "h"; }
+
+  function renderError(msg) {
+    var box = el("div", "warn err", "Error: " + msg);
+    root.insertBefore(box, root.firstChild);
+    setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 6000);
+    reportSize();
+  }
+
+  function render() {
+    if (!plan) return;
+    var total = 0, titles = {};
+    plan.days.forEach(function (d) { d.blocks.forEach(function (b) { total += b.hours; titles[b.task_id] = b.title; }); });
+    root.textContent = "";
+
+    root.appendChild(el("h1", "", "Study plan"));
+    root.appendChild(el("div", "sub", plan.start_date + " \u2192 " + plan.end_date + " \u00b7 " +
+      fmtH(total) + " planned across " + Object.keys(titles).length + " task(s)"));
+
+    // The web chat already IS the agent, so showing this button inside it makes no sense
+    if (hostName !== "college-admin-web") {
+      var ask = el("button", "ask", "Ask agent to build your study plan");
+      ask.addEventListener("click", askAgent);
+      root.appendChild(ask);
+    }
+
+    // controls
+    var c = el("div", "controls");
+    c.appendChild(el("label", "", "Hours / day"));
+    var range = document.createElement("input");
+    range.type = "range"; range.min = "0.5"; range.max = "10"; range.step = "0.5";
+    range.value = plan.hours_per_day; range.disabled = busy;
+    var pill = el("span", "pill", fmtH(plan.hours_per_day));
+    range.addEventListener("input", function () {
+      pill.textContent = fmtH(Number(range.value));
+      clearTimeout(replanTimer);
+      replanTimer = setTimeout(function () { replan(Number(range.value)); }, 350);
+    });
+    c.appendChild(range); c.appendChild(pill);
+    if (busy) c.appendChild(el("span", "pill", "updating\u2026"));
+    root.appendChild(c);
+
+    // warnings
+    if (plan.overdue && plan.overdue.length)
+      root.appendChild(el("div", "warn", "\u26a0 Overdue: " + plan.overdue.length +
+        " task(s) were already past due when this plan starts \u2014 scheduled first."));
+    if (plan.unscheduled && plan.unscheduled.length) {
+      var short = plan.unscheduled.map(function (u) { return u.title + " (" + fmtH(u.hours_missing) + " short)"; });
+      root.appendChild(el("div", "warn", "\u26a0 Doesn't fit at " + fmtH(plan.hours_per_day) +
+        "/day: " + short.join(", ") + ". Try more hours per day."));
+    }
+
+    // days
+    plan.days.forEach(function (d) {
+      var used = d.blocks.reduce(function (s, b) { return s + b.hours; }, 0);
+      var f = fmtDate(d.date), card = el("div", "day");
+      var head = el("div", "day-head", f.wd + " " + f.md);
+      head.appendChild(el("small", "", fmtH(used) + " / " + fmtH(plan.hours_per_day)));
+      card.appendChild(head);
+      var bar = el("div", "bar"), fill = el("div");
+      fill.style.width = Math.min(100, used / plan.hours_per_day * 100) + "%";
+      bar.appendChild(fill); card.appendChild(bar);
+
+      if (!d.blocks.length) card.appendChild(el("div", "rest", "Free day \u2014 nothing scheduled"));
+      d.blocks.forEach(function (b) {
+        var row = el("div", "block"), dot = el("span", "dot");
+        dot.style.background = "hsl(" + hue(b.subject) + ",65%,55%)";
+        var t = el("div", "t"); t.appendChild(el("b", "", b.title)); t.appendChild(el("span", "", b.subject));
+        var btn = el("button", "", "\u2713 Done"); btn.disabled = busy; btn.title = "Mark this task as done";
+        btn.addEventListener("click", function () { markDone(b.task_id); });
+        row.appendChild(dot); row.appendChild(t); row.appendChild(el("span", "hrs", fmtH(b.hours))); row.appendChild(btn);
+        card.appendChild(row);
+      });
+      root.appendChild(card);
+    });
+    reportSize();
+  }
+
+  function reportSize() {
+    notify("ui/notifications/size-changed", { width: Math.ceil(document.documentElement.scrollWidth),
+                                              height: Math.ceil(document.documentElement.scrollHeight) });
+  }
+  if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.body);
+
+  // ---------- startup: handshake with the host ----------
+  if (window.parent === window) {
+    root.innerHTML = "";
+    root.appendChild(el("div", "msg", "This view is an MCP App. Open it from an MCP Apps\u2013capable host " +
+      "(like server/dev_host.py) \u2014 it gets its data from the host."));
+    return;
+  }
+  request("ui/initialize", {
+    appInfo: { name: "college-admin-study-plan", version: "1.0.0" },
+    appCapabilities: {},
+    protocolVersion: PROTOCOL_VERSION
+  }).then(function (res) {
+    hostName = (res && res.hostInfo && res.hostInfo.name) || "";
+    applyHostContext(res && res.hostContext);
+    notify("ui/notifications/initialized");
+  }).catch(function (e) { renderError("Host handshake failed: " + e.message); });
+})();
+</script>
+</body>
+</html>

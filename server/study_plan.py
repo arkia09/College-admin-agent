@@ -1,17 +1,18 @@
 """
 study_plan.py
-Pure scheduling logic: turns a list of pending tasks into a day-wise study
-plan. No MCP, no LLM -- plain data in, plain data out, so it can be tested alone.
+Only the scheduling logic: pending tasks go in, a day-wise plan comes out.
+No MCP and no LLM here, so it is easy to test separately.
 
-Algorithm:
-1. Take pending tasks due on or before the plan's end_date.
-2. Give each task an hour budget by priority (high=4h, medium=2.5h, low=1.5h).
-3. For each day, rank the tasks still needing work: soonest deadline first,
-   and for equal deadlines higher priority first. Overdue tasks (due before
-   the plan starts) are treated as due on day one, so they are scheduled
-   first instead of silently dropped.
-4. Hand out that day's hours in chunks capped at MAX_CHUNK_HOURS per task, so
-   one big task can't swallow the whole day.
+How it works:
+1. Take the pending tasks which are due on or before the plan's end_date.
+2. Each task gets an hour budget based on priority (high=4h, medium=2.5h, low=1.5h).
+   NOTE: this is a fixed guess for now, we are not asking the student for real estimates.
+3. For every day, sort the tasks that still need work: nearest deadline first,
+   and if deadline is same then higher priority first. If a task is already
+   overdue when the plan starts, we treat it as due on day one so it gets
+   scheduled first instead of silently disappearing.
+4. That day's hours are given out in chunks of max MAX_CHUNK_HOURS per task,
+   so that one big task does not eat up the whole day.
 """
 
 from datetime import date, timedelta
@@ -19,7 +20,7 @@ from datetime import date, timedelta
 MAX_CHUNK_HOURS = 2.0
 HOUR_BUDGET = {"high": 4.0, "medium": 2.5, "low": 1.5}
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
-EPS = 1e-9  # guards against float drift (e.g. 0.1 + 0.2) leaving phantom blocks
+EPS = 1e-9  # float drift (like 0.1 + 0.2) should not leave tiny phantom blocks
 
 
 def generate_study_plan(
@@ -34,7 +35,7 @@ def generate_study_plan(
         "start_date", "end_date", "hours_per_day",
         "days": [{"date": ..., "blocks": [{"task_id","title","subject","hours"}]}],
         "overdue": [task_id, ...],       # due before start_date (still scheduled)
-        "unscheduled": [{"task_id","title","hours_missing"}]  # didn't fit
+        "unscheduled": [{"task_id","title","hours_missing"}]  # could not fit
     }
     """
     start = date.fromisoformat(start_date)
@@ -47,7 +48,7 @@ def generate_study_plan(
     relevant = [t for t in tasks if date.fromisoformat(t["due_date"]) <= end]
     by_id = {t["id"]: t for t in relevant}
 
-    # Effective deadline: overdue work is treated as due on day one.
+    # effective deadline: overdue work is treated as due on the first day
     deadline = {t["id"]: max(date.fromisoformat(t["due_date"]), start) for t in relevant}
     overdue = [t["id"] for t in relevant if date.fromisoformat(t["due_date"]) < start]
     remaining = {t["id"]: HOUR_BUDGET.get(t["priority"], 2.0) for t in relevant}
